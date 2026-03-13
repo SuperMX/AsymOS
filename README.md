@@ -24,11 +24,11 @@ I am building this in public. Whether you are a pro dev or just starting, your c
 
 Install the required Python packages:
 
-'''pip install pyautogui pillow ollama'''
+```pip install pyautogui pillow ollama```
 
 Download the LLaMA 3.2 Vision model (requires ~7.8GB):
 
-'''ollama pull llama3.2-vision'''
+```ollama pull llama3.2-vision```
 
 ⚠️ Note: Ensure you have at least 8GB of free storage for the model.
 
@@ -36,13 +36,13 @@ Download the LLaMA 3.2 Vision model (requires ~7.8GB):
 
 Start the agent with:
 
-'''python asymos.py'''
+```python asymos.py```
 
 ## Next Steps
 
-Add coordinates for the cursor
-Add memory
-Task prompt so the agent can do work
+-Add coordinates for the cursor
+-Add memory
+-Task prompt so the agent can do work
 
 ---
 **Visionary Behind the Project:** [Asym](https://x.com/Asym_Alwali)
