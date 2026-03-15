@@ -5,17 +5,26 @@ import io
 import json
 import threading
 import time
+import sys
+from queue import Queue
 
 GLOBAL_GOAL_PROMPT = "open a Browser with the Wikipedia page"
 
 # where the local model is hosted
 OLLAMA_URL = "http://localhost:11434/api/generate"
 # timeout for the model to respond, in seconds
-TIMEOUT_SECONDS = 10*60
+TIMEOUT_SECONDS = 12*60
+
+global width, height
+width, height = 0, 0
+
+pyautogui.FAILSAFE = True
 
 # takes a screenshot
 def screenshot():
     img = pyautogui.screenshot()
+    global width, height
+    width, height = img.size
     #img = img.resize((640, 360))
     img.save("screenshot.png")  # save for debugging
     buffer = io.BytesIO()
@@ -25,45 +34,55 @@ def screenshot():
 # Timer thread
 def start_timer(stop_event):
     seconds = 0
-    while not stop_event.is_set():
-        print(f"[Timer] Waiting: {seconds}s / {TIMEOUT_SECONDS}s", end="\r")
-        time.sleep(1)
-        seconds += 1
+    try:
+        while not stop_event.is_set():
+            print(f"[Timer] Waiting: {seconds}s / {TIMEOUT_SECONDS}s", end="\r")
+            time.sleep(1)
+            seconds += 1
+    except KeyboardInterrupt:
+        print("\n[Interrupt] Stopping request.")
+        sys.exit()
+
+def ask_agent_thread(image_bytes, output_queue):
+    try:
+        result = ask_agent(image_bytes)
+        output_queue.put(result)
+    except Exception as e:
+        output_queue.put(str(e))
 
 # input: read screenshot, output: decide on an action
 def ask_agent(image_bytes):
 
     img_base64 = base64.b64encode(image_bytes).decode()
 
-    prompt = """
-You are controlling a computer. Your goal is to achieve the following: """ + GLOBAL_GOAL_PROMPT + """
-Look at the screenshot and decide ONE action.
+    prompt = f"""
+    You are an AI controlling a computer using mouse and keyboard.
 
-STRICT RULES:
-- Output ONLY ONE JSON object.
-- DO NOT add explanations or text.
-- DO NOT use code blocks.
-- Must be valid JSON parseable by Python.
-- If you cannot decide, return {"action":"wait"}.
+    GOAL:
+    {GLOBAL_GOAL_PROMPT}
 
-Example of valid output:
-{"action":"click","x":500,"y":400}
-"""
-    
-    json_schema = {
-        "type": "object",
-        "properties": {
-            "action": {
-                "type": "string",
-                "enum": ["click","type","wait"]
-            },
-            "x": {"type": "integer"},
-            "y": {"type": "integer"},
-            "text": {"type": "string"}
-        },
-        "required": ["action"],
-        "additionalProperties": False
-    }
+    SCREENSHOT SIZE:
+    width = {width}
+    height = {height}
+
+    Return ONE action to progress toward the goal.
+
+    Actions allowed:
+    - click (x,y)
+    - type (text)
+    - wait
+
+    Rules:
+    - Output ONLY valid JSON
+    - No explanations
+    - Coordinates must be inside the screenshot
+    - If unsure return {{"action":"wait"}}
+
+    Examples:
+    {{"action":"click","x":300,"y":500}}
+    {{"action":"type","text":"wikipedia"}}
+    {{"action":"wait"}}
+    """
 
     stop_event = threading.Event()
     timer_thread = threading.Thread(target=start_timer, args=(stop_event,))
@@ -73,22 +92,62 @@ Example of valid output:
         r = requests.post(
             OLLAMA_URL,
             json={
-                "model": "llama3.2-vision",
+                "model": "qwen3-vl",
                 "prompt": prompt,
                 "images": [img_base64],
-                "stream": False,
-                "json_schema": json_schema
+                "stream": True,
+                #"json_schema": json_schema
             },
-            timeout=TIMEOUT_SECONDS  # <-- timeout in seconds
+            stream=True,
+            timeout=TIMEOUT_SECONDS
         )
+
         r.raise_for_status()
-        return r.json()["response"]
+
+        full_response = ""
+
+        try:
+            for line in r.iter_lines(decode_unicode=True):
+                if not line:
+                    continue
+
+                chunk = json.loads(line)
+                print(chunk)
+                # print reasoning tokens
+                if "thinking" in chunk:
+                    print(chunk["thinking"], end="", flush=True)
+
+                if "reasoning" in chunk:
+                    print(chunk["reasoning"], end="", flush=True)
+
+                # print normal output tokens
+                if "response" in chunk:
+                    token = chunk["response"]
+                    print(token, end="", flush=True)
+                    full_response += token
+
+                if chunk.get("done"):
+                    print()
+                    break
+
+        except KeyboardInterrupt:
+            print("\n[Interrupt] Stopping request.")
+            sys.exit()
+
+        return full_response
+
     except requests.exceptions.Timeout:
         print(f"[Warning] Ollama request timed out after {TIMEOUT_SECONDS}s")
-        return '{"action":"wait"}'  # fallback action
+        return '{"action":"wait"}'
+
     except requests.exceptions.RequestException as e:
         print(f"[Error] Ollama request failed: {e}")
         return '{"action":"wait"}'
+    
+    except KeyboardInterrupt:
+        print("\n[Shutdown] Ctrl+C received. Exiting agent.")
+        sys.exit()
+
     finally:
         stop_event.set()
         timer_thread.join()
@@ -116,15 +175,24 @@ def execute(action):
 print("Starting AsymOS agent. Kill ollama to stop.")
 execute('{"action":"wait"}')
 
-# loop: screenshot -> ask agent -> execute action
-while True:
+# Main loop
+output_queue = Queue()
 
-    print("Taking screenshot...")
-    img = screenshot()
-    #print(img) # print the raw bytes for debugging
-    print("Screenshot taken. Asking agent for action...")
-    decision = ask_agent(img)
+try:
+    while True:
+        img = screenshot()
 
-    print("AGENT decision:", decision)
+        t = threading.Thread(target=ask_agent_thread, args=(img, output_queue), daemon=True)
+        t.start()
 
-    execute(decision)
+        # Wait for the agent response, but still allow Ctrl+C
+        while t.is_alive():
+            t.join(timeout=0.1)  # small timeout so KeyboardInterrupt can be caught
+
+        decision = output_queue.get()
+        print("AGENT decision:", decision)
+        execute(decision)
+
+except KeyboardInterrupt:
+    print("\n[Shutdown] Ctrl+C received. Exiting agent.")
+    sys.exit(0)
